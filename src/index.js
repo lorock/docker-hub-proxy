@@ -88,9 +88,18 @@ export default {
 
         // ---- /token：转发到 auth.docker.io ----
         if (url.pathname === '/token') {
+            // 重写 scope 参数中的仓库名（官方镜像补全 library/ 前缀）
+            const scopeParam = url.searchParams.get('scope')
+            if (scopeParam) {
+                const rewrittenScope = rewriteScope(scopeParam)
+                if (rewrittenScope !== scopeParam) {
+                    url.searchParams.set('scope', rewrittenScope)
+                }
+            }
+
             const target = AUTH_URL + url.pathname + url.search
 
-            // 提取 service 和 scope 参数用于缓存
+            // 提取 service 和 scope 参数用于缓存（使用重写后的 scope）
             const service = url.searchParams.get('service') || ''
             const scope = url.searchParams.get('scope') || ''
             const cacheKey = getTokenCacheKey(service, scope)
@@ -236,6 +245,24 @@ export default {
             headers: newHeaders,
         })
     },
+}
+
+/**
+ * 重写 scope 参数中的仓库名：没有命名空间的官方镜像自动添加 library/ 前缀
+ * repository:nginx:pull -> repository:library/nginx:pull
+ * repository:library/nginx:pull -> 保持不变
+ * repository:myuser/myimage:pull -> 保持不变
+ */
+function rewriteScope(scope) {
+    const match = scope.match(/^repository:([^:]+):(.+)$/)
+    if (match) {
+        const name = match[1]
+        const action = match[2]
+        if (!name.includes('/')) {
+            return `repository:library/${name}:${action}`
+        }
+    }
+    return scope
 }
 
 /**
