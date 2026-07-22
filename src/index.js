@@ -186,6 +186,7 @@ export default {
         // 不校验代理认证：Docker Hub 会返回 401 + Bearer challenge 引导客户端去 /token
         // 而 /token 有代理认证保护，未授权用户无法获取 Bearer token，也就无法拉取镜像
         url.hostname = HUB_HOST
+        url.pathname = rewritePath(url.pathname)
         const headers = buildHeaders(request, HUB_HOST)
 
         // 如果客户端没有 Bearer token，则使用全局 Docker Hub 认证
@@ -275,6 +276,23 @@ export default {
             headers: newHeaders,
         })
     },
+}
+
+/**
+ * 重写镜像路径：没有命名空间的官方镜像自动添加 library/ 前缀
+ * /v2/nginx/manifests/latest -> /v2/library/nginx/manifests/latest
+ * /v2/myuser/myimage/... -> 保持不变
+ */
+function rewritePath(pathname) {
+    const match = pathname.match(/^\/v2\/([^/]+)\/(.*)$/)
+    if (match) {
+        const name = match[1]
+        const rest = match[2]
+        if (!name.includes('/')) {
+            return `/v2/library/${name}/${rest}`
+        }
+    }
+    return pathname
 }
 
 /**
