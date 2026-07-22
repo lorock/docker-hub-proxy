@@ -16,8 +16,7 @@ custom_domain = true
 #   DOCKER_HUB_USERNAME: Docker Hub 用户名
 #   DOCKER_HUB_TOKEN: Docker Hub 访问令牌（推荐使用个人访问令牌而非密码）
 
-# 推荐：代理访问认证（私有化代理，防止公开代理被滥用封号）
-# 在 Cloudflare Dashboard 中配置以下 secrets：
-#   PROXY_USERNAME: 代理访问用户名（自定义）
-#   PROXY_PASSWORD: 代理访问密码（建议使用强密码）
-# 配置后客户端需先 docker login <你的域名> 才能使用代理
+# 推荐：IP 白名单（私有化代理，防止公开代理被滥用封号）
+# 在 Cloudflare Dashboard 中配置 secret：
+#   ALLOWED_IPS: 允许访问的 IP 列表，逗号分隔（如 "1.2.3.4,5.6.7.8"）
+# 未配置时不启用白名单（公开模式）

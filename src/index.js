@@ -10,10 +10,7 @@
  *   2. 自行 follow blob 的 307 重定向（production.cloudflare.docker.com 在国内被墙）
  *   3. 支持全局 Docker Hub 认证，解决未认证拉取速率限制
  *   4. 支持 token 缓存，减少认证请求
- *   5. 支持代理访问认证（Basic Auth），防止公开代理被滥用封号
- *      代理认证仅保护 /token 端点：未授权用户无法获取 Bearer token，
- *      也就无法拉取镜像。/v2/ 等请求不校验代理认证，由 Docker Hub
- *      返回 401 + Bearer challenge 引导客户端去 /token 认证。
+ *   5. 支持 IP 白名单，防止公开代理被滥用封号（对 Docker 完全透明）
  */
 
 const HUB_HOST = 'registry-1.docker.io'
@@ -54,57 +51,21 @@ function getTokenCacheKey(service, scope) {
 }
 
 /**
- * 校验代理访问认证（Basic Auth）
- * - 未配置 PROXY_USERNAME/PROXY_PASSWORD 时不启用认证（公开模式）
- * - Bearer token 是 Docker Hub 认证，直接放行
- * - Basic Auth 是代理认证，校验用户名密码
- * 返回：{ passed: bool, isProxyAuth: bool }
+ * IP 白名单校验
+ * - 未配置 ALLOWED_IPS 时不启用认证（公开模式）
+ * - 通过 CF-Connecting-IP 头获取客户端真实 IP
+ * 返回：bool
  */
-function checkProxyAuth(request, env) {
-    // 未配置代理认证凭据 → 公开模式，直接放行
-    if (!env.PROXY_USERNAME || !env.PROXY_PASSWORD) {
-        return { passed: true, isProxyAuth: false }
+function checkIpWhitelist(request, env) {
+    // 未配置白名单 → 公开模式，直接放行
+    if (!env.ALLOWED_IPS) {
+        return true
     }
 
-    const auth = getAuthHeader(request)
-    if (!auth) {
-        return { passed: false, isProxyAuth: false }
-    }
+    const clientIp = request.headers.get('cf-connecting-ip') || ''
+    const allowedIps = env.ALLOWED_IPS.split(',').map(ip => ip.trim()).filter(ip => ip)
 
-    // Bearer token 是 Docker Hub 的认证（客户端通过 /token 获取），直接放行
-    if (auth.startsWith('Bearer ')) {
-        return { passed: true, isProxyAuth: false }
-    }
-
-    // Basic Auth 是代理认证，校验用户名密码
-    if (auth.startsWith('Basic ')) {
-        try {
-            const decoded = atob(auth.slice(6))
-            const colonIdx = decoded.indexOf(':')
-            if (colonIdx === -1) {
-                return { passed: false, isProxyAuth: false }
-            }
-            const username = decoded.slice(0, colonIdx)
-            const password = decoded.slice(colonIdx + 1)
-            const passed = username === env.PROXY_USERNAME && password === env.PROXY_PASSWORD
-            return { passed, isProxyAuth: passed }
-        } catch {
-            return { passed: false, isProxyAuth: false }
-        }
-    }
-
-    return { passed: false, isProxyAuth: false }
-}
-
-// 返回 401 引导客户端通过 docker login 认证
-function unauthorizedResponse() {
-    return new Response('Unauthorized', {
-        status: 401,
-        headers: {
-            'content-type': 'text/plain',
-            'www-authenticate': 'Basic realm="Docker Hub Proxy"',
-        },
-    })
+    return allowedIps.includes(clientIp)
 }
 
 export default {
@@ -117,13 +78,16 @@ export default {
             return new Response(null, PREFLIGHT_INIT)
         }
 
-        // ---- /token：转发到 auth.docker.io ----
-        // 代理认证仅保护 /token 端点
-        if (url.pathname === '/token') {
-            // 校验代理访问认证（临时：仅标记不阻止，用于排查 docker pull 问题）
-            const authResult = checkProxyAuth(request, env)
-            const proxyAuthHeader = authResult.passed ? 'passed' : 'failed'
+        // ---- IP 白名单校验 ----
+        if (!checkIpWhitelist(request, env)) {
+            return new Response('Forbidden', {
+                status: 403,
+                headers: { 'content-type': 'text/plain' },
+            })
+        }
 
+        // ---- /token：转发到 auth.docker.io ----
+        if (url.pathname === '/token') {
             const target = AUTH_URL + url.pathname + url.search
 
             // 提取 service 和 scope 参数用于缓存
@@ -131,7 +95,15 @@ export default {
             const scope = url.searchParams.get('scope') || ''
             const cacheKey = getTokenCacheKey(service, scope)
 
-            // 构造转发头：移除代理的 Basic Auth，只保留 Bearer token
+            // 检查缓存
+            if (env.CACHE) {
+                const cachedResponse = await env.CACHE.get(cacheKey)
+                if (cachedResponse) {
+                    return cachedResponse
+                }
+            }
+
+            // 构造转发头：只保留 Bearer token（Docker Hub 认证）
             const headers = buildHeaders(request, 'auth.docker.io')
 
             // 如果客户端没有 Bearer token，则使用全局 Docker Hub 认证
@@ -162,13 +134,7 @@ export default {
                     }))
                 }
 
-                // 临时调试：在响应头中标记代理认证状态
-                const debugHeaders = new Headers(response.headers)
-                debugHeaders.set('x-proxy-auth', proxyAuthHeader)
-                return new Response(response.body, {
-                    status: response.status,
-                    headers: debugHeaders,
-                })
+                return response
             } catch (error) {
                 console.error('Auth fetch error:', error)
                 return new Response('Auth fetch failed: ' + error.message, {
@@ -179,8 +145,6 @@ export default {
         }
 
         // ---- 其余请求：转发到 registry-1.docker.io ----
-        // 不校验代理认证：Docker Hub 会返回 401 + Bearer challenge 引导客户端去 /token
-        // 而 /token 有代理认证保护，未授权用户无法获取 Bearer token，也就无法拉取镜像
         url.hostname = HUB_HOST
         url.pathname = rewritePath(url.pathname)
         const headers = buildHeaders(request, HUB_HOST)
@@ -296,7 +260,7 @@ function rewritePath(pathname) {
 
 /**
  * 构造转发请求头：保留必要的客户端头，覆盖 Host
- * 自动移除 Basic Auth（代理认证），只保留 Bearer token（Docker Hub 认证）
+ * 只保留 Bearer token（Docker Hub 认证）
  */
 function buildHeaders(request, host) {
     const headers = new Headers()
@@ -308,7 +272,7 @@ function buildHeaders(request, host) {
         const val = request.headers.get(key)
         if (val) headers.set(key, val)
     }
-    // 只保留 Bearer token（Docker Hub 认证），移除 Basic Auth（代理认证）
+    // 只保留 Bearer token（Docker Hub 认证）
     const auth = request.headers.get('authorization')
     if (auth && auth.startsWith('Bearer ')) {
         headers.set('authorization', auth)
