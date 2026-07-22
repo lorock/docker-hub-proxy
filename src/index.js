@@ -45,7 +45,15 @@ export default {
                 body: request.body,
                 redirect: 'follow',
             }
-            return fetch(new Request(target, init))
+            try {
+                return fetch(new Request(target, init))
+            } catch (error) {
+                console.error('Auth fetch error:', error)
+                return new Response('Auth fetch failed: ' + error.message, {
+                    status: 503,
+                    headers: { 'content-type': 'text/plain' },
+                })
+            }
         }
 
         // ---- 其余请求：转发到 registry-1.docker.io ----
@@ -58,7 +66,16 @@ export default {
             redirect: 'manual', // 手动处理 307，避免客户端直连被墙的 blob 域名
         }
 
-        const response = await fetch(new Request(url.toString(), init))
+        let response
+        try {
+            response = await fetch(new Request(url.toString(), init))
+        } catch (error) {
+            console.error('Proxy fetch error:', error)
+            return new Response('Proxy fetch failed: ' + error.message, {
+                status: 503,
+                headers: { 'content-type': 'text/plain' },
+            })
+        }
         const newHeaders = new Headers(response.headers)
 
         // 改写 Www-Authenticate，让客户端向我们的 /token 请求认证
@@ -74,11 +91,20 @@ export default {
         const location = response.headers.get('Location')
         const status = response.status
         if (location && [301, 302, 307, 308].includes(status)) {
-            const blobResp = await fetch(location, {
-                method: request.method,
-                headers: { 'User-Agent': request.headers.get('User-Agent') || 'docker/24.0' },
-                redirect: 'follow',
-            })
+            let blobResp
+            try {
+                blobResp = await fetch(location, {
+                    method: request.method,
+                    headers: { 'User-Agent': request.headers.get('User-Agent') || 'docker/24.0' },
+                    redirect: 'follow',
+                })
+            } catch (error) {
+                console.error('Blob fetch error:', error)
+                return new Response('Blob fetch failed: ' + error.message, {
+                    status: 503,
+                    headers: { 'content-type': 'text/plain' },
+                })
+            }
             const blobHeaders = new Headers(blobResp.headers)
             blobHeaders.set('access-control-allow-origin', '*')
             blobHeaders.set('access-control-expose-headers', '*')

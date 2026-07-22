@@ -1,12 +1,12 @@
 {
     "name": "docker-hub-proxy",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "Cloudflare Worker as Docker Hub pull-through proxy",
     "private": true,
     "scripts": {
         "deploy": "wrangler deploy"
     },
     "devDependencies": {
-        "wrangler": "^3.0.0"
+        "wrangler": "^4.113.0"
     }
 }
