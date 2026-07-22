@@ -10,3 +10,8 @@ custom_domain = true
 # 可选：在此覆盖代码里的 DEFAULT_WORKERS_URL
 # [vars]
 # WORKERS_URL = "https://docker.cd.run"
+
+# 可选：全局 Docker Hub 认证（解决未认证拉取速率限制）
+# 在 Cloudflare Dashboard 中配置以下 secrets：
+#   DOCKER_HUB_USERNAME: Docker Hub 用户名
+#   DOCKER_HUB_TOKEN: Docker Hub 访问令牌（推荐使用个人访问令牌而非密码）

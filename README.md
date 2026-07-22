@@ -7,6 +7,8 @@
 - 反代 Docker Hub 官方镜像与私有镜像
 - 自动处理 token 认证与 blob 重定向
 - 零服务器成本（Cloudflare 免费额度足够个人/小团队）
+- **支持全局认证**：配置 Docker Hub 账号后，所有未认证请求自动使用全局认证，解决未认证拉取速率限制
+- **Token 缓存**：减少重复认证请求，提升性能
 
 ## 部署
 
@@ -56,9 +58,28 @@ docker pull docker.cd.run/library/nginx:latest
 # }
 ```
 
+## 全局认证（解决拉取速率限制）
+
+Docker Hub 对未认证用户有严格的拉取速率限制（每 6 小时 100 次），配置全局认证后可提升至每 6 小时 200 次。
+
+### 配置步骤
+
+1. 在 [Docker Hub](https://hub.docker.com/settings/security) 创建一个 **Personal Access Token**（推荐使用令牌而非密码）
+
+2. 在 Cloudflare Dashboard 中配置 Worker Secrets：
+   - 进入 Workers → 选择你的 Worker → Settings → Variables → Secrets
+   - 添加以下两个 secrets：
+     - `DOCKER_HUB_USERNAME`: Docker Hub 用户名
+     - `DOCKER_HUB_TOKEN`: 上面创建的个人访问令牌
+
+3. 重新部署 Worker
+
+> **注意**：如果客户端已经提供了自己的认证信息（通过 `docker login`），代理会优先使用客户端的认证，全局认证仅作为兜底。
+
 ## 原理
 
 - `/token` 请求 → 转发到 `auth.docker.io`（认证）
 - 其他请求 → 转发到 `registry-1.docker.io`（元数据与 blob）
 - 改写 `Www-Authenticate` 响应头，将认证地址替换为代理域名
 - 自动处理 blob 的 307 重定向，避免客户端直连被墙的域名
+- 未认证请求自动使用全局认证，解决速率限制问题
