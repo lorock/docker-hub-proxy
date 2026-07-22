@@ -120,11 +120,9 @@ export default {
         // ---- /token：转发到 auth.docker.io ----
         // 代理认证仅保护 /token 端点
         if (url.pathname === '/token') {
-            // 校验代理访问认证
+            // 校验代理访问认证（临时：仅标记不阻止，用于排查 docker pull 问题）
             const authResult = checkProxyAuth(request, env)
-            if (!authResult.passed) {
-                return unauthorizedResponse()
-            }
+            const proxyAuthHeader = authResult.passed ? 'passed' : 'failed'
 
             const target = AUTH_URL + url.pathname + url.search
 
@@ -132,14 +130,6 @@ export default {
             const service = url.searchParams.get('service') || ''
             const scope = url.searchParams.get('scope') || ''
             const cacheKey = getTokenCacheKey(service, scope)
-
-            // 检查缓存
-            if (env.CACHE) {
-                const cachedResponse = await env.CACHE.get(cacheKey)
-                if (cachedResponse) {
-                    return cachedResponse
-                }
-            }
 
             // 构造转发头：移除代理的 Basic Auth，只保留 Bearer token
             const headers = buildHeaders(request, 'auth.docker.io')
@@ -172,7 +162,13 @@ export default {
                     }))
                 }
 
-                return response
+                // 临时调试：在响应头中标记代理认证状态
+                const debugHeaders = new Headers(response.headers)
+                debugHeaders.set('x-proxy-auth', proxyAuthHeader)
+                return new Response(response.body, {
+                    status: response.status,
+                    headers: debugHeaders,
+                })
             } catch (error) {
                 console.error('Auth fetch error:', error)
                 return new Response('Auth fetch failed: ' + error.message, {
