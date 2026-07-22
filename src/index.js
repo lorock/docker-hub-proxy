@@ -10,6 +10,7 @@
  *   2. 自行 follow blob 的 307 重定向（production.cloudflare.docker.com 在国内被墙）
  *   3. 支持全局 Docker Hub 认证，解决未认证拉取速率限制
  *   4. 支持 token 缓存，减少认证请求
+ *   5. 支持代理访问认证（Basic Auth），防止公开代理被滥用封号
  */
 
 const HUB_HOST = 'registry-1.docker.io'
@@ -39,7 +40,7 @@ function buildGlobalAuthHeader(env) {
     return null
 }
 
-// 从请求中获取 Authorization 头（优先使用客户端的认证）
+// 从请求中获取 Authorization 头
 function getAuthHeader(request) {
     return request.headers.get('authorization') || request.headers.get('Authorization')
 }
@@ -47,6 +48,60 @@ function getAuthHeader(request) {
 // 生成 token 缓存键
 function getTokenCacheKey(service, scope) {
     return `token:${service}:${scope}`
+}
+
+/**
+ * 校验代理访问认证（Basic Auth）
+ * - 未配置 PROXY_USERNAME/PROXY_PASSWORD 时不启用认证（公开模式）
+ * - Bearer token 是 Docker Hub 认证，直接放行
+ * - Basic Auth 是代理认证，校验用户名密码
+ * 返回：{ passed: bool, isProxyAuth: bool }
+ */
+function checkProxyAuth(request, env) {
+    // 未配置代理认证凭据 → 公开模式，直接放行
+    if (!env.PROXY_USERNAME || !env.PROXY_PASSWORD) {
+        return { passed: true, isProxyAuth: false }
+    }
+
+    const auth = getAuthHeader(request)
+    if (!auth) {
+        return { passed: false, isProxyAuth: false }
+    }
+
+    // Bearer token 是 Docker Hub 的认证（客户端通过 /token 获取），直接放行
+    if (auth.startsWith('Bearer ')) {
+        return { passed: true, isProxyAuth: false }
+    }
+
+    // Basic Auth 是代理认证，校验用户名密码
+    if (auth.startsWith('Basic ')) {
+        try {
+            const decoded = atob(auth.slice(6))
+            const colonIdx = decoded.indexOf(':')
+            if (colonIdx === -1) {
+                return { passed: false, isProxyAuth: false }
+            }
+            const username = decoded.slice(0, colonIdx)
+            const password = decoded.slice(colonIdx + 1)
+            const passed = username === env.PROXY_USERNAME && password === env.PROXY_PASSWORD
+            return { passed, isProxyAuth: passed }
+        } catch {
+            return { passed: false, isProxyAuth: false }
+        }
+    }
+
+    return { passed: false, isProxyAuth: false }
+}
+
+// 返回 401 引导客户端通过 docker login 认证
+function unauthorizedResponse() {
+    return new Response('Unauthorized', {
+        status: 401,
+        headers: {
+            'content-type': 'text/plain',
+            'www-authenticate': 'Basic realm="Docker Hub Proxy"',
+        },
+    })
 }
 
 export default {
@@ -59,10 +114,16 @@ export default {
             return new Response(null, PREFLIGHT_INIT)
         }
 
+        // ---- 代理访问认证校验 ----
+        const authResult = checkProxyAuth(request, env)
+        if (!authResult.passed) {
+            return unauthorizedResponse()
+        }
+
         // ---- /token：转发到 auth.docker.io ----
         if (url.pathname === '/token') {
             const target = AUTH_URL + url.pathname + url.search
-            
+
             // 提取 service 和 scope 参数用于缓存
             const service = url.searchParams.get('service') || ''
             const scope = url.searchParams.get('scope') || ''
@@ -76,11 +137,12 @@ export default {
                 }
             }
 
-            const headers = buildHeaders(request, 'auth.docker.io')
-            
-            // 如果有全局认证且客户端没有认证，则使用全局认证
+            const headers = buildHeaders(request, 'auth.docker.io', authResult.isProxyAuth)
+
+            // 如果客户端没有 Docker Hub 认证，则使用全局认证
             const clientAuth = getAuthHeader(request)
-            if (!clientAuth) {
+            const isBearer = clientAuth && clientAuth.startsWith('Bearer ')
+            if (!isBearer) {
                 const globalAuth = buildGlobalAuthHeader(env)
                 if (globalAuth) {
                     headers.set('authorization', globalAuth)
@@ -96,7 +158,7 @@ export default {
 
             try {
                 const response = await fetch(new Request(target, init))
-                
+
                 // 如果响应成功，缓存 token
                 if (response.ok && env.CACHE) {
                     const clonedResponse = response.clone()
@@ -117,11 +179,12 @@ export default {
 
         // ---- 其余请求：转发到 registry-1.docker.io ----
         url.hostname = HUB_HOST
-        const headers = buildHeaders(request, HUB_HOST)
+        const headers = buildHeaders(request, HUB_HOST, authResult.isProxyAuth)
 
-        // 如果有全局认证且客户端没有认证，则使用全局认证
+        // 如果客户端没有 Bearer token（Docker Hub 认证），则使用全局认证
         const clientAuth = getAuthHeader(request)
-        if (!clientAuth) {
+        const isBearer = clientAuth && clientAuth.startsWith('Bearer ')
+        if (!isBearer) {
             const globalAuth = buildGlobalAuthHeader(env)
             if (globalAuth) {
                 headers.set('authorization', globalAuth)
@@ -163,7 +226,7 @@ export default {
             let blobResp
             try {
                 const blobHeaders = {}
-                if (clientAuth) {
+                if (isBearer) {
                     blobHeaders['authorization'] = clientAuth
                 } else {
                     const globalAuth = buildGlobalAuthHeader(env)
@@ -171,12 +234,12 @@ export default {
                         blobHeaders['authorization'] = globalAuth
                     }
                 }
-                
+
                 blobResp = await fetch(location, {
                     method: request.method,
-                    headers: { 
+                    headers: {
                         ...blobHeaders,
-                        'User-Agent': request.headers.get('User-Agent') || 'docker/24.0' 
+                        'User-Agent': request.headers.get('User-Agent') || 'docker/24.0'
                     },
                     redirect: 'follow',
                 })
@@ -209,8 +272,9 @@ export default {
 
 /**
  * 构造转发请求头：保留必要的客户端头，覆盖 Host
+ * stripProxyAuth=true 时移除代理的 Basic Auth（仅保留 Bearer token）
  */
-function buildHeaders(request, host) {
+function buildHeaders(request, host, stripProxyAuth = false) {
     const headers = new Headers()
     const copy = [
         'user-agent', 'accept', 'accept-language', 'accept-encoding',
@@ -219,6 +283,13 @@ function buildHeaders(request, host) {
     for (const key of copy) {
         const val = request.headers.get(key)
         if (val) headers.set(key, val)
+    }
+    // 移除代理的 Basic Auth，只保留 Bearer token（Docker Hub 认证）
+    if (stripProxyAuth) {
+        const auth = headers.get('authorization')
+        if (auth && auth.startsWith('Basic ')) {
+            headers.delete('authorization')
+        }
     }
     headers.set('Host', host)
     headers.set('Connection', 'keep-alive')
