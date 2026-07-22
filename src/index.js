@@ -281,15 +281,18 @@ export default {
 /**
  * 重写镜像路径：没有命名空间的官方镜像自动添加 library/ 前缀
  * /v2/nginx/manifests/latest -> /v2/library/nginx/manifests/latest
+ * /v2/library/nginx/... -> 保持不变
  * /v2/myuser/myimage/... -> 保持不变
  */
 function rewritePath(pathname) {
-    const match = pathname.match(/^\/v2\/([^/]+)\/(.*)$/)
+    // 基于 Docker Registry API 端点关键词解析镜像名
+    // 端点：manifests, blobs, tags
+    const match = pathname.match(/^\/v2\/(.+)\/(manifests|blobs|tags)\/(.*)$/)
     if (match) {
         const name = match[1]
-        const rest = match[2]
+        // name 不包含 / 说明是官方镜像简写（如 nginx），添加 library/ 前缀
         if (!name.includes('/')) {
-            return `/v2/library/${name}/${rest}`
+            return `/v2/library/${name}/${match[2]}/${match[3]}`
         }
     }
     return pathname
