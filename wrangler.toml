@@ -1,0 +1,12 @@
+name = "docker-hub-proxy"
+main = "src/index.js"
+compatibility_date = "2026-07-22"
+
+# 绑定自定义域名（国内必须，*.workers.dev 被墙）
+[[routes]]
+pattern = "docker.cd.run"
+custom_domain = true
+
+# 可选：在此覆盖代码里的 DEFAULT_WORKERS_URL
+# [vars]
+# WORKERS_URL = "https://docker.cd.run"
