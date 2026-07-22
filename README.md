@@ -102,11 +102,82 @@ curl -s https://ifconfig.me
 - 不影响 `docker pull` 的 Bearer token 认证流程
 - 未配置 `ALLOWED_IPS` 时为公开模式，所有 IP 可访问
 
+## 配置 Registry Mirror（推荐）
+
+配置后 `docker pull debian` 自动走代理，不需要每次加前缀：
+
+### macOS (Docker Desktop)
+
+Docker Desktop → Settings → Docker Engine → 添加：
+
+```json
+{
+    "registry-mirrors": ["https://docker.cd.run"]
+}
+```
+
+Apply & restart 后生效。
+
+### Linux
+
+```bash
+sudo mkdir -p /etc/docker
+sudo tee /etc/docker/daemon.json <<'EOF'
+{
+    "registry-mirrors": ["https://docker.cd.run"]
+}
+EOF
+sudo systemctl daemon-reload
+sudo systemctl restart docker
+```
+
+## 常见问题 & 踩坑记录
+
+### 1. 为什么不用 Basic Auth 做代理认证？
+
+Docker 客户端的 `docker pull` 流程与 Basic Auth 冲突：客户端先请求 `/v2/` 拿到 Bearer challenge，再去 `/token` 获取 token。如果代理要求 Basic Auth，会与 Docker Hub 的 Bearer 认证流程冲突，导致 `docker pull` 失败。
+
+**解决方案**：使用 IP 白名单代替 Basic Auth，对 Docker 完全透明。
+
+### 2. 官方镜像 `library/` 前缀问题
+
+Docker Hub 官方镜像（如 `nginx`、`debian`）实际仓库名是 `library/nginx`、`library/debian`。当用简写 `docker pull docker.cd.run/nginx` 时，代理需要在两处同时重写：
+
+- 请求路径：`/v2/nginx/...` → `/v2/library/nginx/...`
+- Token scope：`repository:nginx:pull` → `repository:library/nginx:pull`
+
+只改一处会导致 token 权限不匹配，报 `denied: requested access to the resource is denied`。
+
+### 3. IP 白名单只配置了 IPv4，IPv6 访问被拒
+
+如果你的网络支持 IPv6，Docker 可能优先用 IPv6 连接代理。需要把 IPv6 地址也加入白名单，或者在 Cloudflare 中关闭 IPv6：
+
+Cloudflare Dashboard → 域名 → Network → IPv6 → 关闭
+
+查看你的 IP：
+```bash
+curl -s -4 https://ifconfig.me   # IPv4
+curl -s -6 https://ifconfig.me   # IPv6
+```
+
+### 4. wrangler 4.x 需要 Node.js 22+
+
+wrangler 3.x 最高支持 compatibility_date 到 2025 年左右，升级到 wrangler 4.x 后需要 Node.js 22 或更高版本。GitHub Actions 中要把 `node-version` 设为 `'22'`。
+
+### 5. GitHub Actions 的 Environment Secrets
+
+如果把 secrets 配置在 Environment（环境）中，工作流必须声明 `environment: <环境名>` 才能访问这些 secrets，否则会报缺少 `CLOUDFLARE_API_TOKEN` 的错误。
+
+### 6. `npm ci` vs `npm install`
+
+GitHub Actions 中推荐用 `npm ci` 而非 `npm install`，因为 `npm ci` 严格按照 `package-lock.json` 安装，确保构建可复现。前提是 `package-lock.json` 要提交到仓库。
+
 ## 原理
 
 - `/token` 请求 → 转发到 `auth.docker.io`（认证）
 - 其他请求 → 转发到 `registry-1.docker.io`（元数据与 blob）
 - 改写 `Www-Authenticate` 响应头，将认证地址替换为代理域名
 - 自动处理 blob 的 307 重定向，避免客户端直连被墙的域名
-- 官方镜像自动补全 `library/` 前缀（如 `nginx` → `library/nginx`）
+- 官方镜像自动补全 `library/` 前缀（路径和 scope 两处都重写）
 - IP 白名单通过 `CF-Connecting-IP` 头校验客户端真实 IP
+- 支持全局 Docker Hub 认证，提升未认证用户的拉取速率限制
